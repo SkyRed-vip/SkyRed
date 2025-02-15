@@ -1,62 +1,129 @@
-# gitignore template for ECU-TEST workspaces - by TraceTronic https://tracetronic.com
-# website: https://www.ecu-test.com
-#   * all directories are related to the default directories, please adapt the .gitignore if you use customized
-#     directories
+// server.js - الخادم الأساسي لتطبيق SkyRed
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
+const nodemailer = require("nodemailer");
+const bodyParser = require("body-parser");
+const axios = require("axios");
 
-# Dynamic workspace settings
-#   * We don't recommend to ignore the .workspace directory, because of important project specific settings
-# local user settings
-.workspace/ETdrive.xml
-.workspace/favorites.xml
-.workspace/filters.xml
-.workspace/generators.xml
-.workspace/history.xml
-.workspace/parallelExecution.xml
-.workspace/signalviewer.xml
-.workspace/signalViewerHistory.json
-.workspace/signalviewer2layout.xml
-.workspace/testeditor.xml
-.workspace/tooladapter.xml
-.workspace/view.xml
-# optional, if your process depends on this file remove exclusion
-.workspace/interactiveexecution.xml
-.workspace/pythonlibrary.xml
-# deprecated, support for older versions
-.workspace/traceexplorer.xml
+const app = express();
+app.use(express.json());
+app.use(cors());
+app.use(bodyParser.json());
 
-# Custom file formats and test dependencies
-#  * you can manage your artifacts also with TEST-GUIDE (https://www.test-guide.info) and reference them via Playbooks
-*.arxml
-*.a2l
-*.dbc
-*.hex
-*.s19
-[tT]estdata
-[tT]estdaten
+const SECRET_KEY = "skyred_secret";
 
-# Test results and test execution related content
-#   * Git is not intended to store and provide test results for all iterations
-#   * We recommend to use TEST-GUIDE (https://www.test-guide.info) for the test report management
-TestReports
+// الاتصال بقاعدة البيانات MongoDB
+mongoose.connect("mongodb://localhost:27017/skyred", {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+});
 
-# Report generators and templates
-#  * if you want to provide (f.e.) your own report generators exclude the directory here and ignore only the
-#    unnecessary subdirectories
-Templates
+// تعريف النماذج (الموظفين، المهام، الحضور، المحفظة، الموقع)
+const EmployeeSchema = new mongoose.Schema({
+    name: String,
+    email: String,
+    password: String,
+    employeeId: String,
+    balance: { type: Number, default: 0 },
+    location: { latitude: Number, longitude: Number }
+});
+const Employee = mongoose.model("Employee", EmployeeSchema);
 
-# Exclude large binary artifacts
-#  * you can manage your artifacts also with TEST-GUIDE (https://www.test-guide.info) and reference them via Playbooks
-Offline-FIUs
-Offline-Models
-Offline-SGBDs
-*.exe
-*.msi
-*.zip
-*.7z
+const TaskSchema = new mongoose.Schema({
+    title: String,
+    description: String,
+    assignedTo: String,
+    status: { type: String, default: "قيد التنفيذ" },
+    dueDate: Date
+});
+const Task = mongoose.model("Task", TaskSchema);
 
-# Exclude default and custom temporary directories
-Backup_*
+const AttendanceSchema = new mongoose.Schema({
+    employeeId: String,
+    timestamp: { type: Date, default: Date.now },
+    type: String // "حضور" أو "انصراف"
+});
+const Attendance = mongoose.model("Attendance", AttendanceSchema);
 
-# Python bytecode and cache files
-__pycache__/
-*.py[cod]
+// تسجيل مستخدم جديد
+app.post("/register", async (req, res) => {
+    const { name, email, password, employeeId } = req.body;
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = new Employee({ name, email, password: hashedPassword, employeeId });
+    await newUser.save();
+    res.send({ message: "تم إنشاء الحساب بنجاح!" });
+});
+
+// تسجيل الدخول
+app.post("/login", async (req, res) => {
+    const { email, password } = req.body;
+    const user = await Employee.findOne({ email });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+        return res.status(400).send({ message: "بيانات تسجيل الدخول غير صحيحة" });
+    }
+    const token = jwt.sign({ userId: user._id }, SECRET_KEY, { expiresIn: "1h" });
+    res.send({ token, user });
+});
+
+// إرسال إشعار بالبريد الإلكتروني عند تسجيل الحضور المتأخر
+const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+        user: "your-email@gmail.com",
+        pass: "your-password",
+    },
+});
+
+app.post("/attendance/mark", async (req, res) => {
+    const { employeeId, type } = req.body;
+    const attendance = new Attendance({ employeeId, type });
+    await attendance.save();
+
+    if (type === "حضور متأخر") {
+        const employee = await Employee.findOne({ employeeId });
+        if (employee) {
+            await transporter.sendMail({
+                from: "your-email@gmail.com",
+                to: employee.email,
+                subject: "تنبيه تأخير",
+                text: `لقد سجلت حضور متأخر اليوم!`,
+            });
+        }
+    }
+    res.send({ message: `تم تسجيل ${type} بنجاح!` });
+});
+
+// إرسال المهام
+app.post("/tasks/create", async (req, res) => {
+    const { title, description, assignedTo, dueDate } = req.body;
+    const newTask = new Task({ title, description, assignedTo, dueDate });
+    await newTask.save();
+    res.send({ message: "تم تعيين المهمة بنجاح", task: newTask });
+});
+
+// تحديث الموقع
+app.post("/location/update", async (req, res) => {
+    const { employeeId, latitude, longitude } = req.body;
+    await Employee.findOneAndUpdate(
+        { employeeId },
+        { location: { latitude, longitude } },
+        { upsert: true }
+    );
+    res.send({ message: "تم تحديث الموقع بنجاح" });
+});
+
+// الدفع عبر المحافظ الإلكترونية (محاكاة)
+app.post("/wallet/recharge", async (req, res) => {
+    const { employeeId, amount, provider } = req.body;
+    const employee = await Employee.findOne({ employeeId });
+    if (!employee) return res.status(404).send({ message: "الموظف غير موجود" });
+    employee.balance += amount;
+    await employee.save();
+    res.send({ message: `تمت إضافة ${amount} إلى محفظتك عبر ${provider}` });
+});
+
+// تشغيل الخادم
+app.listen(5000, () => console.log("Server is running on port 5000"));
